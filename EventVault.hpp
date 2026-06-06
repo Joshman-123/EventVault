@@ -7,27 +7,32 @@
 #include <utility>
 #include <unordered_map>
 #include <chrono>
-
-// Forward declaration for the transporter interface.
-// The actual implementation should be provided by the user.
-struct ITransporter
-{
-    virtual ~ITransporter() = default;
-    virtual void publish(const uint8_t* data, size_t size) = 0;
-};
+#include <memory>
+#include <atomic>
+#include <thread>
 
 namespace evt
 {
+    struct ITransporter
+    {
+        virtual ~ITransporter() = default;
+        virtual void publish(const uint8_t* data, size_t size) = 0;
+    };
+
     enum class ErrorType : uint8_t
     {
         SUCCESS,
         INVALID_INPUT,
+        ALREADY_INITIALIZED,
+        NOT_INITIALIZED,
         STRING_SIZE_TOO_LARGE,
         INVALID_RING_SIZE,
         INVALID_MAX_STRING_SIZE,
-        INVALID_MAX_LEDGER_SIZE
+        INVALID_MAX_LEDGER_SIZE,
+        QUEUE_FULL
     };
 
+#pragma pack(push, 1)
     struct EventLedgerEntry
     {
         uint32_t m_count{};
@@ -36,91 +41,80 @@ namespace evt
         uint64_t m_firstWallTS{};
         uint64_t m_lastWallTS{};
     };
+#pragma pack(pop)
 
-    struct ErrorEvent
-    {
-        std::string m_eventStr{};
-    };
-
-    struct EventConfig
+    struct EventHandle
     {
         size_t m_maxLedgerEntries{256};
         size_t m_maxStringSize{64};
         size_t m_ringSize{10};
+        size_t m_lockFreeQueueSize{1024};
+        uint32_t m_sleepDurationMs{1};
+        std::unique_ptr<ITransporter> m_transporter{};
     };
 
-    class EventVault
+    struct LockFreeNode
+    {
+        char* m_data{};
+        size_t m_len{};
+        std::atomic<bool> m_ready{false};
+    };
+
+    class EventVault; // Forward declaration
+
+    class EventPublisher final
     {
     public:
-        static EventVault &getInstance();
+        explicit EventPublisher(EventVault& f_vault);
 
-        ErrorType init(const EventConfig &f_config);
+        bool hasTransporter() const;
 
-        ErrorType recordEvent(const std::string &f_eventStr);
-        ErrorType recordEvent(std::string &&f_eventStr);
-        ErrorType recordEvent(const char *f_eventStr);
-
-        void pushToSoC();
+        void pushUnlocked();
+        void push();
 
     private:
-        EventVault();
-        ~EventVault() = default;
-        EventVault(const EventVault &) = delete;
-        EventVault &operator=(const EventVault &) = delete;
-
-        void pushToSoCUnlocked();
-
-        template <typename StringType>
-        ErrorType recordEventInternal(StringType &&f_eventStr);
-
-        std::mutex m_mutex;
-        std::unordered_map<std::string, EventLedgerEntry> m_eventLedger{};
-        EventConfig m_config{};
-        std::vector<ErrorEvent> m_eventHistory;
-        size_t m_historyIdx{};
-        ITransporter *m_transporter{};
+        EventVault& m_vault;
         std::vector<uint8_t> m_payloadBuffer{};
     };
 
-    template <typename StringType>
-    ErrorType EventVault::recordEventInternal(StringType &&f_eventStr)
+    class EventVault final
     {
-        std::lock_guard<std::mutex> l_lock{m_mutex};
+    public:
+        static ErrorType init(EventHandle &&f_handle);
+        static ErrorType deInit();
+        static ErrorType recordEvent(const std::string &f_eventStr);
+        static ErrorType recordEvent(std::string &&f_eventStr);
+        static ErrorType recordEvent(const char *f_eventStr);
+    private:
+        static EventVault &getInstance();
 
-        auto l_it{m_eventLedger.find(f_eventStr)};
-        if (l_it == m_eventLedger.end())
-        {
-            if (m_eventLedger.size() < m_config.m_maxLedgerEntries)
-            {
-                l_it = m_eventLedger.emplace(f_eventStr, EventLedgerEntry{}).first;
-            }
-        }
+        friend class EventPublisher;
 
-        if (l_it != m_eventLedger.end())
-        {
-            auto &l_entry = l_it->second;
-            uint64_t l_mono{static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
-            uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
+        EventVault();
+        ~EventVault();
+        EventVault(const EventVault &) = delete;
+        EventVault &operator=(const EventVault &) = delete;
 
-            if (l_entry.m_count == 0)
-            {
-                l_entry.m_firstMonoTS = l_mono;
-                l_entry.m_firstWallTS = l_wall;
-            }
-            l_entry.m_count++;
-            l_entry.m_lastMonoTS = l_mono;
-            l_entry.m_lastWallTS = l_wall;
-        }
+        ErrorType initInternal(EventHandle &&f_handle);
+        ErrorType deInitInternal();
 
-        m_eventHistory[m_historyIdx] = {std::forward<StringType>(f_eventStr)};
-        m_historyIdx++;
+        ErrorType recordEventInternal(const char *f_data, const size_t f_len);
+        void workerLoop();
 
-        if (m_historyIdx >= m_config.m_ringSize)
-        {
-            pushToSoCUnlocked();
-            m_historyIdx = 0;
-        }
+        std::mutex m_mutex{};
+        std::unordered_map<std::string, EventLedgerEntry> m_eventLedger{};
+        EventHandle m_handle{};
+        std::vector<std::string> m_eventHistory;
+        size_t m_historyIdx{};
+        EventPublisher m_publisher;
+        bool m_initInvoked{false};
 
-        return ErrorType::SUCCESS;
-    }
+        // Lock-free Producer-Consumer queue components
+        std::unique_ptr<LockFreeNode[]> m_lockFreeQueue{};
+        size_t m_queueCapacity{};
+        std::atomic<size_t> m_writeIdx{0};
+        size_t m_readIdx{0};
+        std::atomic<bool> m_running{false};
+        std::thread m_workerThread{};
+    };
 }
