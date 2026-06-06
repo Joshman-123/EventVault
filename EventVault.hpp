@@ -73,6 +73,8 @@ namespace evt
         void push();
 
     private:
+        void serialize();
+
         EventVault& m_vault;
         std::vector<uint8_t> m_payloadBuffer{};
     };

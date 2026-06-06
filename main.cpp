@@ -4,8 +4,10 @@
 #include <thread>
 #include <chrono>
 #include <cstdio>
-#include <random>
-#include <atomic>
+#include <cstring>
+#include <unordered_map>
+#include <vector>
+
 // Forward declaration for the transporter interface.
 // The actual implementation should be provided by the user.
 struct AraTransporter final : public evt::ITransporter
@@ -28,7 +30,7 @@ int main()
     // Example usage:
     evt::EventHandle handle{};
     handle.m_transporter = std::make_unique<AraTransporter>();
-    handle.m_ringSize = 50;
+    handle.m_ringSize = 150; // Increased to comfortably accommodate incoming events from multiple threads
     auto l_ret = evt::EventVault::init(std::move(handle));
 
     if(l_ret != evt::ErrorType::SUCCESS)
@@ -42,44 +44,34 @@ int main()
         std::cout<<"Record Err : "<<(int)l_ret2<<std::endl;
     }
 
-    std::atomic<bool> l_active{true};
+    std::cout << "Logging known deterministic events concurrently via threads...\n";
 
-    // Thread 1: Random Odometry Errors
-    std::thread l_odomThread([&l_active]() {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dist(0, 2);
-        std::uniform_int_distribution<> sleepDist(1, 10);
-        const char* events[] = {"Odom Err", "Odom Err 116", "Odom Err 255"};
-        
-        while (l_active) {
-            evt::EventVault::recordEvent(events[dist(gen)]);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleepDist(gen)));
-        }
-    });
+    auto threadFunc1 = []() {
+        for (int i = 0; i < 10; ++i) evt::EventVault::recordEvent("Avg FPS not reached");
+        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+    };
 
-    // Thread 2: Random Frame Drop Errors
-    std::thread l_frameThread([&l_active]() {
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_int_distribution<> dist(0, 3);
-        std::uniform_int_distribution<> sleepDist(1, 10);
-        const char* events[] = {"FrameDrop for ML", "FrameDrop for MR", "FrameDrop for RV", "FrameDrop for FV"};
-        
-        while (l_active) {
-            evt::EventVault::recordEvent(events[dist(gen)]);
-            std::this_thread::sleep_for(std::chrono::milliseconds(sleepDist(gen)));
-        }
-    });
+    auto threadFunc2 = []() {
+        for (int i = 0; i < 15; ++i) evt::EventVault::recordEvent("FrameDroped");
+        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+    };
 
-    // Let the multi-threaded producers generate events for 1 second
-    std::this_thread::sleep_for(std::chrono::seconds(1));
-    l_active = false;
+    auto threadFunc3 = []() {
+        for (int i = 0; i < 5; ++i) evt::EventVault::recordEvent("Odometery Error");
+        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+    };
 
-    // Wait for producers to exit gracefully
-    l_odomThread.join();
-    l_frameThread.join();
+    std::thread t1(threadFunc1);
+    std::thread t2(threadFunc2);
+    std::thread t3(threadFunc3);
+
+    t1.join();
+    t2.join();
+    t3.join();
     
+    // Give the background worker thread a moment to process the lock-free queue
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
     // Ensure everything is flushed out to output.bin before reading
     evt::EventVault::deInit();
 
@@ -87,35 +79,93 @@ int main()
     FILE* l_file = std::fopen("output.bin", "rb");
     if (l_file)
     {
-        int l_recordIdx = 1;
-        while (true)
+        // Determine the total file size
+        std::fseek(l_file, 0, SEEK_END);
+        size_t l_fileSize = std::ftell(l_file);
+        std::rewind(l_file);
+
+        // Read the entire serialized payload into a buffer at once
+        std::vector<uint8_t> l_readBuffer(l_fileSize);
+        if (std::fread(l_readBuffer.data(), 1, l_fileSize, l_file) == l_fileSize)
         {
-            std::vector<char> l_strBuf(handle.m_maxStringSize + 1, 0);
-            if (std::fread(l_strBuf.data(), 1, l_strBuf.size(), l_file) != l_strBuf.size())
-            {
-                break; // End of file
-            }
-            std::string l_eventStr(l_strBuf.data());
+            size_t l_fixedRecordSize = handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
+            size_t l_offset = 0;
+            int l_recordIdx = 1;
 
-            evt::EventLedgerEntry l_entry{};
-            if (std::fread(&l_entry, sizeof(evt::EventLedgerEntry), 1, l_file) != 1)
+            // Store parsed results for automated verification
+            std::unordered_map<std::string, uint32_t> l_actualCounts;
+
+            // Stride through the buffer deserializing each fixed-length record
+            while (l_offset + l_fixedRecordSize <= l_fileSize)
             {
-                break;
+                // 1. Deserialize the string
+                std::string l_eventStr(reinterpret_cast<const char*>(l_readBuffer.data() + l_offset));
+                l_offset += handle.m_maxStringSize + 1;
+
+                // 2. Deserialize the EventLedgerEntry struct
+                evt::EventLedgerEntry l_entry{};
+                std::memcpy(&l_entry, l_readBuffer.data() + l_offset, sizeof(evt::EventLedgerEntry));
+                l_offset += sizeof(evt::EventLedgerEntry);
+
+                // Skip zero-padded trailing empty records generated by fixed-size buffer padding
+                if (l_eventStr.empty() && l_entry.m_count == 0)
+                {
+                    continue;
+                }
+
+                // Store in our map for later comparison
+                l_actualCounts[l_eventStr] = l_entry.m_count;
+
+                std::cout << "--- Record #" << l_recordIdx++ << " ---\n"
+                          << "Event Message : " << l_eventStr << "\n"
+                          << "Occurrences   : " << l_entry.m_count << "\n"
+                          << "First Mono TS : " << l_entry.m_firstMonoTS << "\n"
+                          << "Last Mono TS  : " << l_entry.m_lastMonoTS << "\n"
+                          << "First Wall TS : " << l_entry.m_firstWallTS << "\n"
+                          << "Last Wall TS  : " << l_entry.m_lastWallTS << "\n\n";
             }
 
-            // Skip zero-padded trailing empty records generated by fixed-size buffer padding
-            if (l_eventStr.empty() && l_entry.m_count == 0)
+            // Verify the parsed data exactly matches our expected deterministic inputs
+            std::unordered_map<std::string, uint32_t> l_expectedCounts = {
+                {"Application started", 1},
+                {"Avg FPS not reached", 10},
+                {"FrameDroped", 15},
+                {"Odometery Error", 5},
+                {"Shared Thread Event", 60}
+            };
+
+            std::cout << "------------------------------------------\n";
+            std::cout << "Validating decoded data...\n";
+            bool l_testPassed = true;
+
+            for (const auto& [expectedStr, expectedCount] : l_expectedCounts)
             {
-                continue;
+                auto it = l_actualCounts.find(expectedStr);
+                if (it == l_actualCounts.end())
+                {
+                    std::cout << " [FAIL] Missing expected event: '" << expectedStr << "'\n";
+                    l_testPassed = false;
+                }
+                else if (it->second != expectedCount)
+                {
+                    std::cout << " [FAIL] Count mismatch for '" << expectedStr 
+                              << "'. Expected " << expectedCount << ", got " << it->second << "\n";
+                    l_testPassed = false;
+                }
             }
 
-            std::cout << "--- Record #" << l_recordIdx++ << " ---\n"
-                      << "Event Message : " << l_eventStr << "\n"
-                      << "Occurrences   : " << l_entry.m_count << "\n"
-                      << "First Mono TS : " << l_entry.m_firstMonoTS << "\n"
-                      << "Last Mono TS  : " << l_entry.m_lastMonoTS << "\n"
-                      << "First Wall TS : " << l_entry.m_firstWallTS << "\n"
-                      << "Last Wall TS  : " << l_entry.m_lastWallTS << "\n\n";
+            if (l_testPassed && l_actualCounts.size() == l_expectedCounts.size())
+            {
+                std::cout << " [SUCCESS] ALL TESTS PASSED! Decoded data perfectly matches logged data.\n";
+            }
+            else if (l_actualCounts.size() != l_expectedCounts.size())
+            {
+                std::cout << " [FAIL] Unexpected events found in decoded payload.\n";
+            }
+        }
+        else
+        {
+            std::cout << "Failed to read the complete serialized file.\n";
         }
         std::fclose(l_file);
     }

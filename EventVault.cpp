@@ -13,37 +13,42 @@ namespace evt
         return m_vault.m_handle.m_transporter != nullptr;
     }
 
+    void EventPublisher::serialize()
+    {
+        // Calculate fixed size representing the maximum possible payload size for the entire ledger
+        size_t l_fixedRecordSize = m_vault.m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
+        size_t l_fixedSize = m_vault.m_handle.m_maxLedgerEntries * l_fixedRecordSize;
+        
+        // Allocate and zero-fill the entire fixed-size buffer
+        m_payloadBuffer.assign(l_fixedSize, 0);
+
+        size_t l_offset = 0;
+        for (const auto& l_pair : m_vault.m_eventLedger)
+        {
+            if (l_offset >= l_fixedSize)
+            {
+                break;
+            }
+
+            const std::string& l_eventStr = l_pair.first;
+            const EventLedgerEntry& l_entry = l_pair.second;
+
+            // Safely cap string length to avoid memory overrun
+            size_t l_strLen = std::min(l_eventStr.size(), m_vault.m_handle.m_maxStringSize);
+            std::memcpy(m_payloadBuffer.data() + l_offset, l_eventStr.c_str(), l_strLen);
+            l_offset += m_vault.m_handle.m_maxStringSize + 1;
+
+            std::memcpy(m_payloadBuffer.data() + l_offset, &l_entry, sizeof(EventLedgerEntry));
+            l_offset += sizeof(EventLedgerEntry);
+        }
+    }
+
     void EventPublisher::pushUnlocked()
     {
         if (m_vault.m_handle.m_transporter && m_vault.m_historyIdx > 0)
         {
-            m_payloadBuffer.clear(); // O(1) reset, keeps previously allocated capacity
-
-            // Calculate fixed size representing the maximum possible payload size for the entire ledger
-            size_t l_fixedRecordSize = m_vault.m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
-            size_t l_fixedSize = m_vault.m_handle.m_maxLedgerEntries * l_fixedRecordSize;
-            
-            // Allocate and zero-fill the entire fixed-size buffer
-            m_payloadBuffer.assign(l_fixedSize, 0);
-
-            size_t l_offset = 0;
-            for (const auto& l_pair : m_vault.m_eventLedger)
-            {
-                if (l_offset >= l_fixedSize)
-                {
-                    break;
-                }
-
-                const std::string& l_eventStr = l_pair.first;
-                const EventLedgerEntry& l_entry = l_pair.second;
-
-                std::memcpy(m_payloadBuffer.data() + l_offset, l_eventStr.c_str(), l_eventStr.size());
-                l_offset += m_vault.m_handle.m_maxStringSize + 1;
-
-                std::memcpy(m_payloadBuffer.data() + l_offset, &l_entry, sizeof(EventLedgerEntry));
-                l_offset += sizeof(EventLedgerEntry);
-            }
-            m_vault.m_handle.m_transporter->publish(m_payloadBuffer.data(), l_fixedSize);
+            serialize();
+            m_vault.m_handle.m_transporter->publish(m_payloadBuffer.data(), m_payloadBuffer.size());
         }
     }
 
@@ -296,7 +301,10 @@ namespace evt
 
             if (l_node.m_ready.load(std::memory_order_acquire))
             {
-                std::string l_eventStr(l_node.m_data, l_node.m_len);
+                // Reuse the existing string buffer in the history ring to prevent
+                // frequent dynamic memory allocations (new/delete) in the worker thread loop.
+                auto& l_eventStr = m_eventHistory[m_historyIdx];
+                l_eventStr.assign(l_node.m_data, l_node.m_len);
 
                 auto l_it{m_eventLedger.find(l_eventStr)};
                 if (l_it == m_eventLedger.end())
@@ -323,7 +331,6 @@ namespace evt
                     l_entry.m_lastWallTS = l_wall;
                 }
 
-                m_eventHistory[m_historyIdx] = std::move(l_eventStr);
                 m_historyIdx++;
 
                 if (m_historyIdx >= m_handle.m_ringSize)
