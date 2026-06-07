@@ -49,7 +49,7 @@ namespace evt
         size_t m_maxStringSize{64};
         size_t m_ringSize{10};
         size_t m_lockFreeQueueSize{1024};
-        uint32_t m_sleepDurationMs{1};
+        uint32_t m_sleepDurationMs{100};
         std::unique_ptr<ITransporter> m_transporter{};
     };
 
@@ -64,7 +64,8 @@ namespace evt
 
     class EventPublisher final
     {
-    public:
+        private:
+        friend class EventVault;
         explicit EventPublisher(EventVault& f_vault);
 
         bool hasTransporter() const;
@@ -72,11 +73,12 @@ namespace evt
         void pushUnlocked();
         void push();
 
-    private:
         void serialize();
 
         EventVault& m_vault;
         std::vector<uint8_t> m_payloadBuffer{};
+        size_t m_fixedRecordSize{};
+        size_t m_fixedSize{};
     };
 
     class EventVault final

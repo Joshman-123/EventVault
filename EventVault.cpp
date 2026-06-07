@@ -15,17 +15,13 @@ namespace evt
 
     void EventPublisher::serialize()
     {
-        // Calculate fixed size representing the maximum possible payload size for the entire ledger
-        size_t l_fixedRecordSize = m_vault.m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
-        size_t l_fixedSize = m_vault.m_handle.m_maxLedgerEntries * l_fixedRecordSize;
-        
         // Allocate and zero-fill the entire fixed-size buffer
-        m_payloadBuffer.assign(l_fixedSize, 0);
+        m_payloadBuffer.assign(m_fixedSize, 0);
 
         size_t l_offset = 0;
         for (const auto& l_pair : m_vault.m_eventLedger)
         {
-            if (l_offset >= l_fixedSize)
+            if (l_offset >= m_fixedSize)
             {
                 break;
             }
@@ -173,6 +169,11 @@ namespace evt
 
         m_handle = std::move(f_handle);
         m_eventHistory.resize(m_handle.m_ringSize);
+        
+        // Pre-calculate fixed buffer sizes for the publisher
+        m_publisher.m_fixedRecordSize = m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
+        m_publisher.m_fixedSize = m_handle.m_maxLedgerEntries * m_publisher.m_fixedRecordSize;
+        m_publisher.m_payloadBuffer.reserve(m_publisher.m_fixedSize);
 
         // Allocate and setup memory pool for lock-free queue
         size_t l_queueSize = m_handle.m_lockFreeQueueSize > 0 ? m_handle.m_lockFreeQueueSize : 1024;
@@ -293,7 +294,9 @@ namespace evt
     {
         auto l_lastPushTime = std::chrono::steady_clock::now();
 
-        while (m_running.load(std::memory_order_acquire))
+        // Continue running if the thread is active, OR if the queue still has unprocessed events.
+        // This ensures the queue is completely drained during deInit() before the thread exits.
+        while (m_running.load(std::memory_order_acquire) || m_lockFreeQueue[m_readIdx % m_queueCapacity].m_ready.load(std::memory_order_acquire))
         {
             const size_t l_idx = m_readIdx % m_queueCapacity;
 
@@ -301,11 +304,14 @@ namespace evt
 
             if (l_node.m_ready.load(std::memory_order_acquire))
             {
+                auto l_now = std::chrono::steady_clock::now();
+
                 // Reuse the existing string buffer in the history ring to prevent
                 // frequent dynamic memory allocations (new/delete) in the worker thread loop.
-                auto& l_eventStr = m_eventHistory[m_historyIdx];
+                auto& l_eventStr = m_eventHistory[m_readIdx % m_handle.m_ringSize];
                 l_eventStr.assign(l_node.m_data, l_node.m_len);
 
+                /*If and only if its a new entry we emplace it for the first Time*/
                 auto l_it{m_eventLedger.find(l_eventStr)};
                 if (l_it == m_eventLedger.end())
                 {
@@ -315,12 +321,14 @@ namespace evt
                     }
                 }
 
+                // If the event exists OR was successfully added just now
                 if (l_it != m_eventLedger.end())
                 {
                     auto &l_entry = l_it->second;
-                    uint64_t l_mono{static_cast<uint64_t>(std::chrono::steady_clock::now().time_since_epoch().count())};
+                    uint64_t l_mono{static_cast<uint64_t>(l_now.time_since_epoch().count())};
                     uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
 
+                    /*We log the first time it has occured*/
                     if (l_entry.m_count == 0)
                     {
                         l_entry.m_firstMonoTS = l_mono;
@@ -333,15 +341,19 @@ namespace evt
 
                 m_historyIdx++;
 
-                if (m_historyIdx >= m_handle.m_ringSize)
-                {
-                    m_publisher.pushUnlocked();
-                    m_historyIdx = 0;
-                    l_lastPushTime = std::chrono::steady_clock::now();
-                }
-
                 l_node.m_ready.store(false, std::memory_order_release);
                 m_readIdx++;
+
+                // Enforce time-based push even when under heavy constant load
+                if (std::chrono::duration_cast<std::chrono::milliseconds>(l_now - l_lastPushTime).count() >= m_handle.m_sleepDurationMs)
+                {
+                    if (m_historyIdx > 0)
+                    {
+                        m_publisher.pushUnlocked();
+                        m_historyIdx = 0;
+                    }
+                    l_lastPushTime = l_now;
+                }
             }
             else
             {
@@ -353,7 +365,7 @@ namespace evt
                         m_publisher.pushUnlocked();
                         m_historyIdx = 0;
                     }
-                    l_lastPushTime = std::chrono::steady_clock::now();
+                    l_lastPushTime = l_now;
                 }
 
                 // Yield gracefully to prevent CPU pegging while idle

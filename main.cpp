@@ -22,6 +22,7 @@ struct AraTransporter final : public evt::ITransporter
         }
     }
 };
+
 int main()
 {
     // Clear the file from previous runs to ensure a clean slate
@@ -29,8 +30,13 @@ int main()
 
     // Example usage:
     evt::EventHandle handle{};
-    handle.m_transporter = std::make_unique<AraTransporter>();
+    handle.m_lockFreeQueueSize = 1024;
+    handle.m_maxLedgerEntries = 256;
+    handle.m_maxStringSize = 64;
+    handle.m_sleepDurationMs = 10; // Use a more reasonable batching interval
     handle.m_ringSize = 150; // Increased to comfortably accommodate incoming events from multiple threads
+    handle.m_transporter = std::make_unique<AraTransporter>();
+
     auto l_ret = evt::EventVault::init(std::move(handle));
 
     if(l_ret != evt::ErrorType::SUCCESS)
@@ -39,6 +45,7 @@ int main()
     }
 
     auto l_ret2 = evt::EventVault::recordEvent("Application started");
+
     if(l_ret2 != evt::ErrorType::SUCCESS)
     {
         std::cout<<"Record Err : "<<(int)l_ret2<<std::endl;
@@ -48,17 +55,23 @@ int main()
 
     auto threadFunc1 = []() {
         for (int i = 0; i < 10; ++i) evt::EventVault::recordEvent("Avg FPS not reached");
-        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+        for (int i = 0; i < 20; ++i) {
+            evt::EventVault::recordEvent("Shared Thread Event");
+        }
     };
 
     auto threadFunc2 = []() {
         for (int i = 0; i < 15; ++i) evt::EventVault::recordEvent("FrameDroped");
-        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+        for (int i = 0; i < 20; ++i) {
+            evt::EventVault::recordEvent("Shared Thread Event");
+        }
     };
 
     auto threadFunc3 = []() {
         for (int i = 0; i < 5; ++i) evt::EventVault::recordEvent("Odometery Error");
-        for (int i = 0; i < 20; ++i) evt::EventVault::recordEvent("Shared Thread Event");
+        for (int i = 0; i < 20; ++i) {
+            evt::EventVault::recordEvent("Shared Thread Event");
+        }
     };
 
     std::thread t1(threadFunc1);
@@ -68,9 +81,8 @@ int main()
     t1.join();
     t2.join();
     t3.join();
-    
-    // Give the background worker thread a moment to process the lock-free queue
-    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+
+    printf("All work Completed \n");
 
     // Ensure everything is flushed out to output.bin before reading
     evt::EventVault::deInit();
