@@ -1,0 +1,53 @@
+graph LR
+    subgraph "Application Space"
+        P1["Producer Thread 1"]
+        P2["Producer Thread 2"]
+        PN["Producer Thread N"]
+    end
+
+    subgraph "EventVault Core System (Singleton)"
+        API["EventVault API<br/>(recordEvent)"]
+        LFQ[/"Wait-Free Ring Buffer<br/>(Lock-Free Queue)"/]
+
+        subgraph "Background Processing (Asynchronous)"
+            WT(("Worker Thread<br/>(Consumer)"))
+            LEDGER[("Event Ledger<br/>(In-Memory Aggregation)")]
+            PUB[["Event Publisher<br/>(Binary Serializer)"]]
+        end
+    end
+
+    subgraph "I/O & Persistence Layer"
+        TRANS{{"ITransporter<br/>(Injected Interface)"}}
+        FILE[("External Sink<br/>(e.g., output.bin)")]
+    end
+
+    %% Data Flow Connections
+    P1 -->|Non-blocking log| API
+    P2 -->|Non-blocking log| API
+    PN -->|Non-blocking log| API
+
+    API -->|Atomic Fetch-Add| LFQ
+
+    LFQ -->|Poll/Read events| WT
+    WT -->|Update counts & timestamps| LEDGER
+    WT -->|Time/Capacity triggered flush| PUB
+    LEDGER -.->|Read aggregated state| PUB
+    PUB -->|Push serialized payload| TRANS
+    TRANS -->|Write/Publish| FILE
+
+    %% Styling for a professional look
+    classDef producer fill:#e1f5fe,stroke:#039be5,stroke-width:2px,color:#000
+    classDef api fill:#fff3e0,stroke:#fb8c00,stroke-width:2px,color:#000
+    classDef queue fill:#f3e5f5,stroke:#8e24aa,stroke-width:2px,color:#000
+    classDef worker fill:#ffebee,stroke:#e53935,stroke-width:2px,color:#000
+    classDef storage fill:#e8f5e9,stroke:#43a047,stroke-width:2px,color:#000
+    classDef interface fill:#eceff1,stroke:#546e7a,stroke-width:2px,color:#000
+
+    class P1,P2,PN producer;
+    class API api;
+    class LFQ queue;
+    class WT worker;
+    class LEDGER storage;
+    class PUB api;
+    class TRANS interface;
+    class FILE storage;

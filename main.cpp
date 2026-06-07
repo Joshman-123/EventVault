@@ -12,9 +12,9 @@
 // The actual implementation should be provided by the user.
 struct AraTransporter final : public evt::ITransporter
 {
-    virtual void publish(const uint8_t* data, size_t size)
+    void publish(const uint8_t* data, const size_t size) override
     {
-        printf("Writing Data to output.bin\n");
+        std::cout << "Writing Data to output.bin\n";
         std::ofstream l_file("output.bin", std::ios::binary | std::ios::trunc);
         if (l_file.is_open())
         {
@@ -37,14 +37,14 @@ int main()
     l_handle.m_ringSize = 150;
     l_handle.m_transporter = std::make_unique<AraTransporter>();
 
-    auto l_ret = evt::EventVault::init(std::move(l_handle));
+    const auto l_ret = evt::EventVault::init(std::move(l_handle));
 
     if(l_ret != evt::ErrorType::SUCCESS)
     {
         std::cout<<"Init Err : "<<(int)l_ret<<std::endl;
     }
 
-    auto l_ret2 = evt::EventVault::recordEvent("Application started");
+    const auto l_ret2 = evt::EventVault::recordEvent("Application started");
 
     if(l_ret2 != evt::ErrorType::SUCCESS)
     {
@@ -53,21 +53,21 @@ int main()
 
     std::cout << "Logging known deterministic events concurrently via threads...\n";
 
-    auto threadFunc1 = []() {
+    const auto threadFunc1 = []() {
         for (int i = 0; i < 10; ++i) evt::EventVault::recordEvent("Avg FPS not reached");
         for (int i = 0; i < 20; ++i) {
             evt::EventVault::recordEvent("Shared Thread Event");
         }
     };
 
-    auto threadFunc2 = []() {
+    const auto threadFunc2 = []() {
         for (int i = 0; i < 15; ++i) evt::EventVault::recordEvent("FrameDroped");
         for (int i = 0; i < 20; ++i) {
             evt::EventVault::recordEvent("Shared Thread Event");
         }
     };
 
-    auto threadFunc3 = []() {
+    const auto threadFunc3 = []() {
         for (int i = 0; i < 5; ++i) evt::EventVault::recordEvent("Odometery Error");
         for (int i = 0; i < 20; ++i) {
             evt::EventVault::recordEvent("Shared Thread Event");
@@ -82,25 +82,24 @@ int main()
     t2.join();
     t3.join();
 
-    printf("All work Completed \n");
+    std::cout << "All work Completed \n";
 
     // Ensure everything is flushed out to output.bin before reading
     evt::EventVault::deInit();
 
     std::cout << "\nReading back data from output.bin:\n";
-    FILE* l_file = std::fopen("output.bin", "rb");
-    if (l_file)
+    std::ifstream l_file("output.bin", std::ios::binary | std::ios::ate);
+    if (l_file.is_open())
     {
         // Determine the total file size
-        std::fseek(l_file, 0, SEEK_END);
-        size_t l_fileSize = std::ftell(l_file);
-        std::rewind(l_file);
+        const size_t l_fileSize = static_cast<size_t>(l_file.tellg());
+        l_file.seekg(0, std::ios::beg);
 
         // Read the entire serialized payload into a buffer at once
         std::vector<uint8_t> l_readBuffer(l_fileSize);
-        if (std::fread(l_readBuffer.data(), 1, l_fileSize, l_file) == l_fileSize)
+        if (l_file.read(reinterpret_cast<char*>(l_readBuffer.data()), l_fileSize))
         {
-            size_t l_fixedRecordSize = l_handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
+            const size_t l_fixedRecordSize = l_handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
             size_t l_offset = 0;
             int l_recordIdx = 1;
 
@@ -138,7 +137,7 @@ int main()
             }
 
             // Verify the parsed data exactly matches our expected deterministic inputs
-            std::unordered_map<std::string, uint32_t> l_expectedCounts = {
+        const std::unordered_map<std::string, uint32_t> l_expectedCounts = {
                 {"Application started", 1},
                 {"Avg FPS not reached", 10},
                 {"FrameDroped", 15},

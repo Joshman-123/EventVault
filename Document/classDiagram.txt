@@ -1,0 +1,68 @@
+classDiagram
+    direction TB
+
+    class ITransporter {
+        <<Interface>>
+        +publish(data, size)* void
+    }
+
+    class AraTransporter {
+        +publish(data, size) void
+    }
+    AraTransporter --|> ITransporter : implements
+
+    class EventHandle {
+        +m_maxLedgerEntries: size_t
+        +m_maxStringSize: size_t
+        +m_ringSize: size_t
+        +m_lockFreeQueueSize: size_t
+        +m_sleepDurationMs: uint32_t
+        +m_transporter: unique_ptr~ITransporter~
+    }
+
+    class EventLedgerEntry {
+        +m_firstMonoTS: uint64_t
+        +m_lastMonoTS: uint64_t
+        +m_firstWallTS: uint64_t
+        +m_lastWallTS: uint64_t
+        +m_count: uint32_t
+    }
+
+    class LockFreeNode {
+        +m_data: char*
+        +m_len: size_t
+        +m_ready: atomic~bool~
+    }
+
+    class EventPublisher {
+        <<friend of EventVault>>
+        -m_vault: EventVault&
+        -m_payloadBuffer: vector~uint8_t~
+        +EventPublisher(EventVault&)
+        +push() void
+        -hasTransporter() bool
+        -pushUnlocked() void
+        -serialize() void
+    }
+
+    class EventVault {
+        <<Singleton>>
+        -m_eventLedger: unordered_map~string, EventLedgerEntry~
+        -m_handle: EventHandle
+        -m_publisher: EventPublisher
+        -m_lockFreeQueue: unique_ptr~LockFreeNode[]~
+        -m_workerThread: thread
+        +init(EventHandle&&)* ErrorType
+        +deInit()* ErrorType
+        +recordEvent(const string&)* ErrorType
+        -getInstance()* EventVault&
+        -workerLoop() void
+        -recordEventInternal(data, len) ErrorType
+    }
+
+    EventVault "1" *-- "1" EventPublisher : contains
+    EventVault "1" *-- "1" EventHandle : contains
+    EventHandle "1" *-- "1" ITransporter : contains
+    EventVault "1" *-- "N" LockFreeNode : contains
+    EventVault "1" *-- "N" EventLedgerEntry : aggregates in map
+    EventPublisher "1" --o "1" EventVault : references

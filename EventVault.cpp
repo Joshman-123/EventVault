@@ -1,3 +1,8 @@
+/**
+ * @file EventVault.cpp
+ * @brief Implementation of the EventVault class and its associated serialization and threading logic.
+ */
+
 #include "EventVault.hpp"
 #include <cstring>
 #include <unordered_set>
@@ -13,6 +18,10 @@ namespace evt
         return m_vault.m_handle.m_transporter != nullptr;
     }
 
+    /**
+     * @details Flattens the ledger map into a contiguous binary block using memcpy.
+     * Strings are padded with null bytes to ensure a strict, predictable fixed-size record format.
+     */
     void EventPublisher::serialize()
     {
         // Allocate and zero-fill the entire fixed-size buffer
@@ -30,7 +39,7 @@ namespace evt
             const EventLedgerEntry& l_entry = l_pair.second;
 
             // Safely cap string length to avoid memory overrun
-            size_t l_strLen = std::min(l_eventStr.size(), m_vault.m_handle.m_maxStringSize);
+            const size_t l_strLen = std::min(l_eventStr.size(), m_vault.m_handle.m_maxStringSize);
             std::memcpy(m_payloadBuffer.data() + l_offset, l_eventStr.c_str(), l_strLen);
             l_offset += m_vault.m_handle.m_maxStringSize + 1;
 
@@ -54,6 +63,10 @@ namespace evt
         pushUnlocked();
         m_vault.m_historyIdx = 0;
     }
+
+    // ============================================================================
+    // EventVault
+    // ============================================================================
 
     EventVault &EventVault::getInstance()
     {
@@ -176,7 +189,7 @@ namespace evt
         m_publisher.m_payloadBuffer.reserve(m_publisher.m_fixedSize);
 
         // Allocate and setup memory pool for lock-free queue
-        size_t l_queueSize = m_handle.m_lockFreeQueueSize > 0 ? m_handle.m_lockFreeQueueSize : 1024;
+        const size_t l_queueSize = m_handle.m_lockFreeQueueSize > 0 ? m_handle.m_lockFreeQueueSize : 1024;
         if (m_lockFreeQueue)
         {
             for (size_t l_i{}; l_i < m_queueCapacity; ++l_i)
@@ -257,7 +270,7 @@ namespace evt
         {
             return ErrorType::INVALID_INPUT;
         }
-        size_t l_len = std::strlen(f_eventStr);
+        const size_t l_len = std::strlen(f_eventStr);
         if (l_len > l_instance.m_handle.m_maxStringSize)
         {
             return ErrorType::STRING_SIZE_TOO_LARGE;
@@ -265,6 +278,10 @@ namespace evt
         return l_instance.recordEventInternal(f_eventStr, l_len);
     }
 
+    /**
+     * @details Implements the producer side of the wait-free ring buffer. Employs atomic 
+     * fetch_add to securely reserve a slot without locks, enabling microsecond-level ingestion latency.
+     */
     ErrorType EventVault::recordEventInternal(const char *f_data, const size_t f_len)
     {
         /*Not Mandatory for the Transporter to be avaialbe.If no transporter are there return back
@@ -290,6 +307,11 @@ namespace evt
         return ErrorType::SUCCESS;
     }
 
+    /**
+     * @details Background thread execution loop. Constantly polls the lock-free queue for new 
+     * events to aggregate into the ledger. Utilizes time-based batching to periodically trigger
+     * a flush to the payload publisher.
+     */
     void EventVault::workerLoop()
     {
         auto l_lastPushTime = std::chrono::steady_clock::now();
@@ -304,7 +326,7 @@ namespace evt
 
             if (l_node.m_ready.load(std::memory_order_acquire))
             {
-                auto l_now = std::chrono::steady_clock::now();
+                const auto l_now = std::chrono::steady_clock::now();
 
                 // Reuse the existing string buffer in the history ring to prevent
                 // frequent dynamic memory allocations (new/delete) in the worker thread loop.
@@ -325,8 +347,8 @@ namespace evt
                 if (l_it != m_eventLedger.end())
                 {
                     auto &l_entry = l_it->second;
-                    uint64_t l_mono{static_cast<uint64_t>(l_now.time_since_epoch().count())};
-                    uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
+                    const uint64_t l_mono{static_cast<uint64_t>(l_now.time_since_epoch().count())};
+                    const uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
 
                     /*We log the first time it has occured*/
                     if (l_entry.m_count == 0)
@@ -357,7 +379,7 @@ namespace evt
             }
             else
             {
-                auto l_now = std::chrono::steady_clock::now();
+                const auto l_now = std::chrono::steady_clock::now();
                 if (std::chrono::duration_cast<std::chrono::milliseconds>(l_now - l_lastPushTime).count() >= m_handle.m_sleepDurationMs)
                 {
                     if (m_historyIdx > 0)

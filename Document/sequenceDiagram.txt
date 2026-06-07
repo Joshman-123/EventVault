@@ -1,0 +1,47 @@
+sequenceDiagram
+    actor P as Producer Thread
+    participant EV_S as EventVault (static)
+    participant EV_I as instance: EventVault
+    participant LFQ as m_lockFreeQueue
+    participant WT as m_workerThread
+    participant EL as m_eventLedger
+    participant EP as m_publisher: EventPublisher
+    participant TR as m_transporter: ITransporter
+
+    P->>EV_S: recordEvent("My Event")
+    EV_S->>EV_I: getInstance()
+    EV_S->>EV_I: recordEventInternal("My Event", 10)
+    activate EV_I
+    EV_I->>LFQ: 1. Atomically get write_idx
+    EV_I->>LFQ: 2. memcpy(data)
+    EV_I->>LFQ: 3. Set ready=true (release)
+    EV_I-->>P: return SUCCESS
+    deactivate EV_I
+
+    par Worker Loop
+        WT->>LFQ: Poll for ready node (acquire)
+        activate WT
+        Note over WT: Finds a ready node
+        WT->>LFQ: Read data from node
+        WT->>EL: Find/emplace "My Event"
+        activate EL
+        WT->>EL: Update count and timestamps
+        deactivate EL
+        WT->>LFQ: Set ready=false (release)
+        deactivate WT
+    and Periodic Flush
+        activate WT
+        Note over WT: Time for periodic flush
+        WT->>EP: pushUnlocked()
+        activate EP
+        EP->>EP: serialize()
+        activate EP
+        EP->>EL: Read ledger data
+        deactivate EP
+        EP->>TR: publish(payload, size)
+        activate TR
+        TR-->>EP: return
+        deactivate TR
+        deactivate EP
+        deactivate WT
+    end
