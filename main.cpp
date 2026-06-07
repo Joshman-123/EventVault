@@ -29,15 +29,15 @@ int main()
     std::remove("output.bin");
 
     // Example usage:
-    evt::EventHandle handle{};
-    handle.m_lockFreeQueueSize = 1024;
-    handle.m_maxLedgerEntries = 256;
-    handle.m_maxStringSize = 64;
-    handle.m_sleepDurationMs = 10; // Use a more reasonable batching interval
-    handle.m_ringSize = 150; // Increased to comfortably accommodate incoming events from multiple threads
-    handle.m_transporter = std::make_unique<AraTransporter>();
+    evt::EventHandle l_handle{};
+    l_handle.m_lockFreeQueueSize = 1024;
+    l_handle.m_maxLedgerEntries = 256;
+    l_handle.m_maxStringSize = 64;
+    l_handle.m_sleepDurationMs = 10;
+    l_handle.m_ringSize = 150;
+    l_handle.m_transporter = std::make_unique<AraTransporter>();
 
-    auto l_ret = evt::EventVault::init(std::move(handle));
+    auto l_ret = evt::EventVault::init(std::move(l_handle));
 
     if(l_ret != evt::ErrorType::SUCCESS)
     {
@@ -100,7 +100,7 @@ int main()
         std::vector<uint8_t> l_readBuffer(l_fileSize);
         if (std::fread(l_readBuffer.data(), 1, l_fileSize, l_file) == l_fileSize)
         {
-            size_t l_fixedRecordSize = handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
+            size_t l_fixedRecordSize = l_handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
             size_t l_offset = 0;
             int l_recordIdx = 1;
 
@@ -112,7 +112,7 @@ int main()
             {
                 // 1. Deserialize the string
                 std::string l_eventStr(reinterpret_cast<const char*>(l_readBuffer.data() + l_offset));
-                l_offset += handle.m_maxStringSize + 1;
+                l_offset += l_handle.m_maxStringSize + 1;
 
                 // 2. Deserialize the EventLedgerEntry struct
                 evt::EventLedgerEntry l_entry{};

@@ -35,11 +35,11 @@ namespace evt
 #pragma pack(push, 1)
     struct EventLedgerEntry
     {
-        uint32_t m_count{};
         uint64_t m_firstMonoTS{};
         uint64_t m_lastMonoTS{};
         uint64_t m_firstWallTS{};
         uint64_t m_lastWallTS{};
+        uint32_t m_count{};
     };
 #pragma pack(pop)
 
@@ -96,6 +96,8 @@ namespace evt
 
         EventVault();
         ~EventVault();
+        EventVault(EventVault &&) = delete;
+        EventVault &operator=(EventVault &&) = delete;
         EventVault(const EventVault &) = delete;
         EventVault &operator=(const EventVault &) = delete;
 
