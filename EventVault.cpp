@@ -1,5 +1,9 @@
 /**
  * @file EventVault.cpp
+ * @author Joshua
+ * @date 2025
+ * @copyright Copyright (c) 2025. Anyone is free to use, modify, and distribute this software without restriction.
+ * 
  * @brief Implementation of the EventVault class and its associated serialization and threading logic.
  */
 

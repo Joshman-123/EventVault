@@ -1,5 +1,9 @@
 /**
  * @file EventVault.hpp
+ * @author Joshua
+ * @date 2025
+ * @copyright Copyright (c) 2025. Anyone is free to use, modify, and distribute this software without restriction.
+ * 
  * @brief Defines the EventVault system for high-performance, concurrent event logging and aggregation.
  */
 
