@@ -7,6 +7,7 @@
 #include <cstring>
 #include <unordered_map>
 #include <vector>
+#include <iomanip>
 
 // Forward declaration for the transporter interface.
 // The actual implementation should be provided by the user.
@@ -30,11 +31,11 @@ int main()
 
     // Example usage:
     evt::EventHandle l_handle{};
-    l_handle.m_lockFreeQueueSize = 1024;
-    l_handle.m_maxLedgerEntries = 256;
-    l_handle.m_maxStringSize = 64;
-    l_handle.m_sleepDurationMs = 10;
-    l_handle.m_ringSize = 150;
+    l_handle.m_lockFreeQueueSize = 1024U;
+    l_handle.m_maxLedgerEntries = 256U;
+    l_handle.m_maxStringSize = 64U;
+    l_handle.m_sleepDurationMs = 10U;
+    l_handle.m_ringSize = 150U;
     l_handle.m_transporter = std::make_unique<AraTransporter>();
 
     const auto l_ret = evt::EventVault::init(std::move(l_handle));
@@ -99,8 +100,26 @@ int main()
         std::vector<uint8_t> l_readBuffer(l_fileSize);
         if (l_file.read(reinterpret_cast<char*>(l_readBuffer.data()), l_fileSize))
         {
+            if (l_fileSize < sizeof(uint32_t))
+            {
+                std::cout << "File too small to contain CRC header.\n";
+                return -1;
+            }
+
+            uint32_t l_expectedCrc{};
+            std::memcpy(&l_expectedCrc, l_readBuffer.data(), sizeof(uint32_t));
+            uint32_t l_actualCrc = evt::calculateCRC32(l_readBuffer.data() + sizeof(uint32_t), l_fileSize - sizeof(uint32_t));
+
+            if (l_expectedCrc != l_actualCrc)
+            {
+                std::cout << " [FAIL] CRC mismatch! Expected 0x" << std::hex << l_expectedCrc 
+                          << ", got 0x" << l_actualCrc << std::dec << "\n";
+                return -1;
+            }
+            std::cout << " [SUCCESS] CRC Match: 0x" << std::hex << l_expectedCrc << std::dec << "\n\n";
+
             const size_t l_fixedRecordSize = l_handle.m_maxStringSize + 1 + sizeof(evt::EventLedgerEntry);
-            size_t l_offset = 0;
+            size_t l_offset = sizeof(uint32_t);
             int l_recordIdx = 1;
 
             // Store parsed results for automated verification
@@ -178,7 +197,7 @@ int main()
         {
             std::cout << "Failed to read the complete serialized file.\n";
         }
-        std::fclose(l_file);
+        l_file.close();
     }
     else
     {

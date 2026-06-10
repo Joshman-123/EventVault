@@ -23,6 +23,23 @@
 namespace evt
 {
     /**
+     * @brief Computes standard IEEE 802.3 CRC-32 checksum.
+     * @param data Pointer to the binary data array.
+     * @param length Size of the binary data in bytes.
+     * @return The 32-bit CRC checksum.
+     */
+    inline uint32_t calculateCRC32(const uint8_t* data, size_t length) {
+        uint32_t crc = 0xFFFFFFFF;
+        for (size_t i = 0; i < length; ++i) {
+            crc ^= data[i];
+            for (int j = 0; j < 8; ++j) {
+                crc = (crc >> 1) ^ ((crc & 1) ? 0xEDB88320 : 0);
+            }
+        }
+        return ~crc;
+    }
+
+    /**
      * @brief Interface for data transport mechanisms.
      * 
      * Implementations of this interface define how the serialized event ledger 
@@ -56,12 +73,8 @@ namespace evt
         QUEUE_FULL               /**< Lock-free queue is full; event was dropped. */
     };
 
-#pragma pack(push, 1)
     /**
      * @brief Structure representing a single aggregated event record.
-     * 
-     * @note Packed tightly (1-byte alignment) to ensure predictable, compact 
-     * cross-platform binary serialization.
      */
     struct EventLedgerEntry
     {
@@ -70,8 +83,8 @@ namespace evt
         uint64_t m_firstWallTS{}; /**< System clock timestamp of the first occurrence. */
         uint64_t m_lastWallTS{};  /**< System clock timestamp of the most recent occurrence. */
         uint32_t m_count{};       /**< Total number of times this event occurred. */
+        uint32_t m_padding{};     /**< Explicit padding to maintain strict 8-byte alignment boundaries. */
     };
-#pragma pack(pop)
 
     /**
      * @brief Configuration handle used to initialize the EventVault.
@@ -155,6 +168,9 @@ namespace evt
         
         /** @brief Pre-calculated maximum total size in bytes of the serialized payload. */
         size_t m_fixedSize{};
+
+        /** @brief Pre-calculated total size including the CRC32 header. */
+        size_t m_totalPayloadSize{};
     };
 
     // ============================================================================
@@ -257,7 +273,7 @@ namespace evt
         std::vector<std::string> m_eventHistory;                           /**< Ring buffer of pre-allocated strings to prevent runtime allocations. */
         size_t m_historyIdx{};                                             /**< Current index in the event history ring buffer. */
         EventPublisher m_publisher;                                        /**< Dedicated publisher instance for serializing/pushing data. */
-        bool m_initInvoked{false};                                         /**< Flag indicating if the vault has been initialized. */
+        std::atomic<bool> m_initInvoked{false};                                         /**< Flag indicating if the vault has been initialized. */
 
         // Lock-free Producer-Consumer queue components
         std::unique_ptr<LockFreeNode[]> m_lockFreeQueue{}; /**< Fixed-size array representing the wait-free queue. */

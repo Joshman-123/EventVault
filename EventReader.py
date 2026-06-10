@@ -1,5 +1,6 @@
 import struct
 import os
+import zlib
 
 def main():
     file_path = "output.bin"
@@ -14,11 +15,12 @@ def main():
     
     # EventLedgerEntry struct format:
     # 4x uint64_t (Q) + 1x uint32_t (I)
+    # + 4 bytes padding (4x) due to C++ standard struct alignment
     # '<' ensures little-endian parsing which is standard for x86/ARM memory dumps
-    struct_format = '<QQQQI'
-    struct_size = struct.calcsize(struct_format) # 36 bytes
+    struct_format = '<QQQQI4x'
+    struct_size = struct.calcsize(struct_format) # 40 bytes
     
-    # Total fixed record size = 65 + 36 = 101 bytes
+    # Total fixed record size = 65 + 40 = 105 bytes
     fixed_record_size = string_buffer_size + struct_size 
     
     actual_counts = {}
@@ -26,15 +28,27 @@ def main():
     print("\nReading back data from output.bin:")
     
     with open(file_path, "rb") as f:
-        record_idx = 1
-        
-        while True:
-            # Read a fixed-size chunk representing one full record
-            chunk = f.read(fixed_record_size)
+        crc_data = f.read(4)
+        if not crc_data or len(crc_data) < 4:
+            print("File too small to contain CRC header.")
+            return
             
-            # Break if we hit the end of the file or an incomplete chunk
-            if not chunk or len(chunk) < fixed_record_size:
-                break
+        expected_crc = struct.unpack('<I', crc_data)[0]
+        payload_data = f.read()
+        actual_crc = zlib.crc32(payload_data) & 0xFFFFFFFF
+        
+        if expected_crc != actual_crc:
+            print(f" [FAIL] CRC mismatch! Expected {hex(expected_crc)}, got {hex(actual_crc)}")
+            return
+            
+        print(f" [SUCCESS] CRC Match: {hex(expected_crc)}\n")
+
+        record_idx = 1
+        offset = 0
+        
+        while offset + fixed_record_size <= len(payload_data):
+            chunk = payload_data[offset:offset+fixed_record_size]
+            offset += fixed_record_size
                 
             # 1. Deserialize the string
             raw_string = chunk[:string_buffer_size]

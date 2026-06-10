@@ -15,6 +15,7 @@ namespace evt
 {
     EventPublisher::EventPublisher(EventVault& f_vault) : m_vault(f_vault)
     {
+
     }
 
     bool EventPublisher::hasTransporter() const
@@ -28,13 +29,13 @@ namespace evt
      */
     void EventPublisher::serialize()
     {
-        // Allocate and zero-fill the entire fixed-size buffer
-        m_payloadBuffer.assign(m_fixedSize, 0);
+        // Allocate and zero-fill the entire fixed-size buffer + CRC header
+        m_payloadBuffer.assign(m_totalPayloadSize, 0);
 
-        size_t l_offset = 0;
+        size_t l_offset = sizeof(uint32_t); // Start after CRC header
         for (const auto& l_pair : m_vault.m_eventLedger)
         {
-            if (l_offset >= m_fixedSize)
+            if (l_offset >= m_totalPayloadSize)
             {
                 break;
             }
@@ -50,6 +51,10 @@ namespace evt
             std::memcpy(m_payloadBuffer.data() + l_offset, &l_entry, sizeof(EventLedgerEntry));
             l_offset += sizeof(EventLedgerEntry);
         }
+
+        // Calculate CRC32 of the payload and store it at the very beginning
+        const uint32_t l_crc = calculateCRC32(m_payloadBuffer.data() + sizeof(uint32_t), m_fixedSize);
+        std::memcpy(m_payloadBuffer.data(), &l_crc, sizeof(uint32_t));
     }
 
     void EventPublisher::pushUnlocked()
@@ -94,22 +99,18 @@ namespace evt
 
     ErrorType EventVault::deInitInternal()
     {
+        std::lock_guard<std::mutex> l_lock{m_mutex};
+        if(false == m_initInvoked.exchange(false, std::memory_order_relaxed))
         {
-            std::lock_guard<std::mutex> l_lock{m_mutex};
-            if(false == m_initInvoked)
-            {
-                return ErrorType::NOT_INITIALIZED;
-            }
+            return ErrorType::NOT_INITIALIZED;
         }
 
-        m_initInvoked = false;
         m_running.store(false, std::memory_order_release);
+
         if (m_workerThread.joinable())
         {
             m_workerThread.join();
         }
-
-        std::lock_guard<std::mutex> l_lock{m_mutex};
 
         // Force flush any pending events in the buffer to the SoC before destroying
         if (m_historyIdx > 0)
@@ -133,6 +134,12 @@ namespace evt
         m_historyIdx = 0;
         m_eventHistory.clear();
         m_eventLedger.clear();
+        m_initInvoked.store(false, std::memory_order_release);
+
+        if (m_publisher.hasTransporter())
+        {
+            m_publisher.m_vault.m_handle.m_transporter.reset();
+        }
 
         return ErrorType::SUCCESS;
     }
@@ -144,28 +151,29 @@ namespace evt
 
     ErrorType EventVault::initInternal(EventHandle &&f_handle)
     {
+        /*why Double safety Net, mutex and atomic?... because i still want
+        to have quick lookup of is InitInvoked via Atomic for recordEvent(),
+        and also still want to seralize Init and Deinit sequence via Mutex Lock */
+        std::lock_guard<std::mutex> l_lock{m_mutex};
+        if(true == m_initInvoked.load(std::memory_order_acquire))
         {
-            std::lock_guard<std::mutex> l_lock{m_mutex};
-            if(true == m_initInvoked)
-            {
-                return ErrorType::ALREADY_INITIALIZED;
-            }
+            return ErrorType::ALREADY_INITIALIZED;
         }
 
         if (f_handle.m_ringSize == 0U)
         {
             return ErrorType::INVALID_RING_SIZE;
         }
+
         if (f_handle.m_maxStringSize == 0U)
         {
             return ErrorType::INVALID_MAX_STRING_SIZE;
         }
+
         if (f_handle.m_maxLedgerEntries == 0U)
         {
             return ErrorType::INVALID_MAX_LEDGER_SIZE;
         }
-
-        std::lock_guard<std::mutex> l_lock{m_mutex};
 
         // Stop existing worker safely if re-initialized
         if (m_running.load(std::memory_order_acquire))
@@ -190,7 +198,8 @@ namespace evt
         // Pre-calculate fixed buffer sizes for the publisher
         m_publisher.m_fixedRecordSize = m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
         m_publisher.m_fixedSize = m_handle.m_maxLedgerEntries * m_publisher.m_fixedRecordSize;
-        m_publisher.m_payloadBuffer.reserve(m_publisher.m_fixedSize);
+        m_publisher.m_totalPayloadSize = m_publisher.m_fixedSize + sizeof(uint32_t);
+        m_publisher.m_payloadBuffer.reserve(m_publisher.m_totalPayloadSize);
 
         // Allocate and setup memory pool for lock-free queue
         const size_t l_queueSize = m_handle.m_lockFreeQueueSize > 0 ? m_handle.m_lockFreeQueueSize : 1024;
@@ -220,7 +229,7 @@ namespace evt
 
         m_workerThread = std::thread(&EventVault::workerLoop, this);
 
-        m_initInvoked = true;
+        m_initInvoked.store(true,std::memory_order_release);
 
         return ErrorType::SUCCESS;
     }
@@ -228,7 +237,7 @@ namespace evt
     ErrorType EventVault::recordEvent(const std::string &f_eventStr)
     {
         auto& l_instance = getInstance();
-        if(false == l_instance.m_initInvoked)
+        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
         {
             return ErrorType::SUCCESS;
         }
@@ -247,25 +256,28 @@ namespace evt
     {
         auto& l_instance = getInstance();
 
-        if(false == l_instance.m_initInvoked)
+        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
         {
             return ErrorType::SUCCESS;
         }
+
         if (f_eventStr.empty())
         {
             return ErrorType::INVALID_INPUT;
         }
+
         if (f_eventStr.size() > l_instance.m_handle.m_maxStringSize)
         {
             return ErrorType::STRING_SIZE_TOO_LARGE;
         }
+
         return l_instance.recordEventInternal(f_eventStr.data(), f_eventStr.size());
     }
 
     ErrorType EventVault::recordEvent(const char *f_eventStr)
     {
         auto& l_instance = getInstance();
-        if(false == l_instance.m_initInvoked)
+        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
         {
             return ErrorType::SUCCESS;
         }
