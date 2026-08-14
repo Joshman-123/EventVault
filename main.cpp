@@ -26,6 +26,7 @@ struct AraTransporter final : public evt::ITransporter
 
 int main()
 {
+
     // Clear the file from previous runs to ensure a clean slate
     std::remove("output.bin");
 
@@ -34,18 +35,17 @@ int main()
     l_handle.m_lockFreeQueueSize = 1024U;
     l_handle.m_maxLedgerEntries = 256U;
     l_handle.m_maxStringSize = 64U;
-    l_handle.m_sleepDurationMs = 10U;
     l_handle.m_ringSize = 150U;
     l_handle.m_transporter = std::make_unique<AraTransporter>();
 
-    const auto l_ret = evt::EventVault::init(std::move(l_handle));
+    const auto l_ret = eVault::init(std::move(l_handle));
 
     if(l_ret != evt::ErrorType::SUCCESS)
     {
         std::cout<<"Init Err : "<<(int)l_ret<<std::endl;
     }
 
-    const auto l_ret2 = evt::EventVault::recordEvent("Application started");
+    const auto l_ret2 = eVault::recordEvent("Application started");
 
     if(l_ret2 != evt::ErrorType::SUCCESS)
     {
@@ -55,23 +55,23 @@ int main()
     std::cout << "Logging known deterministic events concurrently via threads...\n";
 
     const auto threadFunc1 = []() {
-        for (int i = 0; i < 10; ++i) evt::EventVault::recordEvent("Avg FPS not reached");
+        for (int i = 0; i < 10; ++i) eVault::recordEvent("Avg FPS not reached");
         for (int i = 0; i < 20; ++i) {
-            evt::EventVault::recordEvent("Shared Thread Event");
+            eVault::recordEvent("Shared Thread Event");
         }
     };
 
     const auto threadFunc2 = []() {
-        for (int i = 0; i < 15; ++i) evt::EventVault::recordEvent("FrameDroped");
+        for (int i = 0; i < 15; ++i) eVault::recordEvent("FrameDroped");
         for (int i = 0; i < 20; ++i) {
-            evt::EventVault::recordEvent("Shared Thread Event");
+            eVault::recordEvent("Shared Thread Event");
         }
     };
 
     const auto threadFunc3 = []() {
-        for (int i = 0; i < 5; ++i) evt::EventVault::recordEvent("Odometery Error");
+        for (int i = 0; i < 5; ++i) eVault::recordEvent("Odometery Error");
         for (int i = 0; i < 20; ++i) {
-            evt::EventVault::recordEvent("Shared Thread Event");
+            eVault::recordEvent("Shared Thread Event");
         }
     };
 
@@ -85,8 +85,15 @@ int main()
 
     std::cout << "All work Completed \n";
 
+    // Publish the current aggregated ledger only when the caller explicitly requests it.
+    const auto l_publishRet = eVault::publishData();
+    if (l_publishRet != evt::ErrorType::SUCCESS)
+    {
+        std::cout << "Publish Err : " << (int)l_publishRet << std::endl;
+    }
+
     // Ensure everything is flushed out to output.bin before reading
-    evt::EventVault::deInit();
+    eVault::deInit();
 
     std::cout << "\nReading back data from output.bin:\n";
     std::ifstream l_file("output.bin", std::ios::binary | std::ios::ate);

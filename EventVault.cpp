@@ -234,6 +234,17 @@ namespace evt
         return ErrorType::SUCCESS;
     }
 
+    ErrorType EventVault::publishData()
+    {
+        auto& l_instance = getInstance();
+        if (false == l_instance.m_initInvoked.load(std::memory_order_acquire))
+        {
+            return ErrorType::NOT_INITIALIZED;
+        }
+
+        return l_instance.publishDataInternal();
+    }
+
     ErrorType EventVault::recordEvent(const std::string &f_eventStr)
     {
         auto& l_instance = getInstance();
@@ -252,46 +263,15 @@ namespace evt
         return l_instance.recordEventInternal(f_eventStr.data(), f_eventStr.size());
     }
 
-    ErrorType EventVault::recordEvent(std::string &&f_eventStr)
+    ErrorType EventVault::publishDataInternal()
     {
-        auto& l_instance = getInstance();
-
-        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
+        std::lock_guard<std::mutex> l_lock{m_mutex};
+        if (m_historyIdx > 0)
         {
-            return ErrorType::SUCCESS;
+            m_publisher.pushUnlocked();
+            m_historyIdx = 0;
         }
-
-        if (f_eventStr.empty())
-        {
-            return ErrorType::INVALID_INPUT;
-        }
-
-        if (f_eventStr.size() > l_instance.m_handle.m_maxStringSize)
-        {
-            return ErrorType::STRING_SIZE_TOO_LARGE;
-        }
-
-        return l_instance.recordEventInternal(f_eventStr.data(), f_eventStr.size());
-    }
-
-    ErrorType EventVault::recordEvent(const char *f_eventStr)
-    {
-        auto& l_instance = getInstance();
-        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
-        {
-            return ErrorType::SUCCESS;
-        }
-
-        if (!f_eventStr || f_eventStr[0] == '\0')
-        {
-            return ErrorType::INVALID_INPUT;
-        }
-        const size_t l_len = std::strlen(f_eventStr);
-        if (l_len > l_instance.m_handle.m_maxStringSize)
-        {
-            return ErrorType::STRING_SIZE_TOO_LARGE;
-        }
-        return l_instance.recordEventInternal(f_eventStr, l_len);
+        return ErrorType::SUCCESS;
     }
 
     /**
@@ -330,14 +310,11 @@ namespace evt
      */
     void EventVault::workerLoop()
     {
-        auto l_lastPushTime = std::chrono::steady_clock::now();
-
         // Continue running if the thread is active, OR if the queue still has unprocessed events.
         // This ensures the queue is completely drained during deInit() before the thread exits.
         while (m_running.load(std::memory_order_acquire) || m_lockFreeQueue[m_readIdx % m_queueCapacity].m_ready.load(std::memory_order_acquire))
         {
             const size_t l_idx = m_readIdx % m_queueCapacity;
-
             auto& l_node = m_lockFreeQueue[l_idx];
 
             if (l_node.m_ready.load(std::memory_order_acquire))
@@ -381,33 +358,11 @@ namespace evt
 
                 l_node.m_ready.store(false, std::memory_order_release);
                 m_readIdx++;
-
-                // Enforce time-based push even when under heavy constant load
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(l_now - l_lastPushTime).count() >= m_handle.m_sleepDurationMs)
-                {
-                    if (m_historyIdx > 0)
-                    {
-                        m_publisher.pushUnlocked();
-                        m_historyIdx = 0;
-                    }
-                    l_lastPushTime = l_now;
-                }
             }
             else
             {
-                const auto l_now = std::chrono::steady_clock::now();
-                if (std::chrono::duration_cast<std::chrono::milliseconds>(l_now - l_lastPushTime).count() >= m_handle.m_sleepDurationMs)
-                {
-                    if (m_historyIdx > 0)
-                    {
-                        m_publisher.pushUnlocked();
-                        m_historyIdx = 0;
-                    }
-                    l_lastPushTime = l_now;
-                }
-
-                // Yield gracefully to prevent CPU pegging while idle
-                std::this_thread::sleep_for(std::chrono::milliseconds(m_handle.m_sleepDurationMs));
+                // Do not auto-publish on a timer; wait for the caller to explicitly trigger publishData().
+                std::this_thread::yield();
             }
         }
     }

@@ -19,6 +19,12 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+namespace evt
+{
+    class EventVault;
+}
+
+using eVault = evt::EventVault;
 
 namespace evt
 {
@@ -91,11 +97,10 @@ namespace evt
      */
     struct EventHandle
     {
-        size_t m_maxLedgerEntries{256};                /**< Maximum number of unique events tracked in the ledger. */
-        size_t m_maxStringSize{64};                    /**< Maximum length in characters for an event name. */
-        size_t m_ringSize{10};                         /**< History buffer size for recycling memory allocations. */
-        size_t m_lockFreeQueueSize{1024};              /**< Maximum concurrent pending events in the wait-free queue. */
-        uint32_t m_sleepDurationMs{100};               /**< Flush interval and background thread sleep duration. */
+        size_t m_maxLedgerEntries{0};                /**< Maximum number of unique events tracked in the ledger. */
+        size_t m_maxStringSize{0};                    /**< Maximum length in characters for an event name. */
+        size_t m_ringSize{0};                         /**< History buffer size for recycling memory allocations. */
+        size_t m_lockFreeQueueSize{0};              /**< Maximum concurrent pending events in the wait-free queue. */
         std::unique_ptr<ITransporter> m_transporter{}; /**< Custom transport implementation for payload publishing. */
     };
 
@@ -201,26 +206,18 @@ namespace evt
         static ErrorType deInit();
 
         /**
+         * @brief Publishes the current aggregated ledger immediately.
+         * The caller decides when to serialize and push the buffered ledger data.
+         * @return ErrorType::SUCCESS on success, or NOT_INITIALIZED if the vault has not been started.
+         */
+        static ErrorType publishData();
+
+        /**
          * @brief Logs an event by string reference.
          * @param f_eventStr The event message to log.
          * @return ErrorType::SUCCESS on success, or an appropriate error code.
          */
         static ErrorType recordEvent(const std::string &f_eventStr);
-
-        /**
-         * @brief Logs an event by rvalue string.
-         * @param f_eventStr The event message to log.
-         * @return ErrorType::SUCCESS on success, or an appropriate error code.
-         */
-        static ErrorType recordEvent(std::string &&f_eventStr);
-
-        /**
-         * @brief Logs an event by raw C-string.
-         * @param f_eventStr The null-terminated event message to log.
-         * @return ErrorType::SUCCESS on success, or an appropriate error code.
-         */
-        static ErrorType recordEvent(const char *f_eventStr);
-        
     private:
         /**
          * @brief Retrieves the singleton instance.
@@ -261,6 +258,12 @@ namespace evt
          * @return ErrorType::SUCCESS on success, or QUEUE_FULL.
          */
         ErrorType recordEventInternal(const char *f_data, const size_t f_len);
+
+        /**
+         * @brief Publishes the current ledger immediately from the caller context.
+         * @return ErrorType::SUCCESS on success.
+         */
+        ErrorType publishDataInternal();
         
         /**
          * @brief Main execution loop for the background worker thread.
