@@ -19,6 +19,8 @@
 #include <memory>
 #include <atomic>
 #include <thread>
+#include <queue>
+#include <condition_variable>
 namespace evt
 {
     class EventVault;
@@ -109,8 +111,7 @@ namespace evt
      */
     struct LockFreeNode
     {
-        char* m_data{};                   /**< Pre-allocated buffer for storing the raw event string. */
-        size_t m_len{};                   /**< Length of the stored event string. */
+        std::string m_data{};             /**< Buffer for storing the event string. */
         std::atomic<bool> m_ready{false}; /**< Flag indicating data is ready for the consumer to read. */
     };
 
@@ -218,6 +219,14 @@ namespace evt
          * @return ErrorType::SUCCESS on success, or an appropriate error code.
          */
         static ErrorType recordEvent(const std::string &f_eventStr);
+
+        /**
+         * @brief Queries the size of the serialized data that will be written on the next publishData() call.
+         * This allows callers to pre-allocate buffers or check memory requirements before publishing.
+         * @return Size in bytes of the serialized payload (including CRC header), or 0 if not initialized.
+         */
+        static size_t getSerializedDataSize();
+
     private:
         /**
          * @brief Retrieves the singleton instance.
@@ -237,7 +246,7 @@ namespace evt
         EventVault &operator=(EventVault &&) = delete;
         EventVault(const EventVault &) = delete;
         EventVault &operator=(const EventVault &) = delete;
-
+  
         /**
          * @brief Internal implementation of the initialization logic.
          * @param f_handle Configuration settings and dependencies.
@@ -273,17 +282,19 @@ namespace evt
         std::mutex m_mutex{};                                              /**< Mutex protecting shared state during init/deInit. */
         std::unordered_map<std::string, EventLedgerEntry> m_eventLedger{}; /**< Ledger mapping unique event names to their aggregated records. */
         EventHandle m_handle{};                                            /**< Active configuration settings for the vault. */
-        std::vector<std::string> m_eventHistory;                           /**< Ring buffer of pre-allocated strings to prevent runtime allocations. */
+        std::vector<std::string> m_eventHistory{};                           /**< Ring buffer of pre-allocated strings to prevent runtime allocations. */
         size_t m_historyIdx{};                                             /**< Current index in the event history ring buffer. */
         EventPublisher m_publisher;                                        /**< Dedicated publisher instance for serializing/pushing data. */
         std::atomic<bool> m_initInvoked{false};                                         /**< Flag indicating if the vault has been initialized. */
 
-        // Lock-free Producer-Consumer queue components
-        std::unique_ptr<LockFreeNode[]> m_lockFreeQueue{}; /**< Fixed-size array representing the wait-free queue. */
-        size_t m_queueCapacity{};                          /**< Total capacity of the lock-free queue. */
-        std::atomic<size_t> m_writeIdx{0};                 /**< Producer's write index into the lock-free queue. */
-        size_t m_readIdx{0};                               /**< Consumer's read index into the lock-free queue. */
-        std::atomic<bool> m_running{false};                /**< Atomic flag controlling the lifecycle of the worker thread. */
-        std::thread m_workerThread{};                      /**< Background thread responsible for aggregating events. */
+        // Simple, safe queue for producer/consumer handoff.
+        std::queue<std::string> m_eventQueue{};
+        std::mutex m_queueMutex{};
+        std::condition_variable m_queueCv{};
+        size_t m_queueCapacity{};
+        size_t m_writeIdx{0};
+        size_t m_readIdx{0};
+        std::atomic<bool> m_running{false};
+        std::thread m_workerThread{};
     };
 }

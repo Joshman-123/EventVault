@@ -85,6 +85,10 @@ int main()
 
     std::cout << "All work Completed \n";
 
+    // Query the serialized data size before publishing
+    const size_t l_serializedSize = eVault::getSerializedDataSize();
+    std::cout << "\nSerialized data size to be written: " << l_serializedSize << " bytes\n";
+
     // Publish the current aggregated ledger only when the caller explicitly requests it.
     const auto l_publishRet = eVault::publishData();
     if (l_publishRet != evt::ErrorType::SUCCESS)

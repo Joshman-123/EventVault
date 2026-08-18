@@ -106,6 +106,7 @@ namespace evt
         }
 
         m_running.store(false, std::memory_order_release);
+        m_queueCv.notify_all();
 
         if (m_workerThread.joinable())
         {
@@ -118,18 +119,16 @@ namespace evt
             m_publisher.pushUnlocked();
         }
 
-        if (m_lockFreeQueue)
         {
-            for (size_t l_i{}; l_i < m_queueCapacity; ++l_i)
+            std::lock_guard<std::mutex> l_queueLock{m_queueMutex};
+            while (!m_eventQueue.empty())
             {
-                delete[] m_lockFreeQueue[l_i].m_data;
-                m_lockFreeQueue[l_i].m_data = nullptr;
+                m_eventQueue.pop();
             }
-            m_lockFreeQueue.reset();
         }
 
         m_queueCapacity = 0;
-        m_writeIdx.store(0, std::memory_order_relaxed);
+        m_writeIdx = 0;
         m_readIdx = 0;
         m_historyIdx = 0;
         m_eventHistory.clear();
@@ -179,6 +178,7 @@ namespace evt
         if (m_running.load(std::memory_order_acquire))
         {
             m_running.store(false, std::memory_order_release);
+            m_queueCv.notify_all();
             if (m_workerThread.joinable())
             {
                 m_workerThread.join();
@@ -201,27 +201,18 @@ namespace evt
         m_publisher.m_totalPayloadSize = m_publisher.m_fixedSize + sizeof(uint32_t);
         m_publisher.m_payloadBuffer.reserve(m_publisher.m_totalPayloadSize);
 
-        // Allocate and setup memory pool for lock-free queue
         const size_t l_queueSize = m_handle.m_lockFreeQueueSize > 0 ? m_handle.m_lockFreeQueueSize : 1024;
-        if (m_lockFreeQueue)
+        m_queueCapacity = l_queueSize;
+
         {
-            for (size_t l_i{}; l_i < m_queueCapacity; ++l_i)
+            std::lock_guard<std::mutex> l_queueLock{m_queueMutex};
+            while (!m_eventQueue.empty())
             {
-                delete[] m_lockFreeQueue[l_i].m_data;
+                m_eventQueue.pop();
             }
         }
 
-        m_queueCapacity = l_queueSize;
-
-        m_lockFreeQueue.reset(new LockFreeNode[m_queueCapacity]);
-
-        for (size_t l_i{}; l_i < m_queueCapacity; ++l_i)
-        {
-            m_lockFreeQueue[l_i].m_data = new char[m_handle.m_maxStringSize + 1];
-            m_lockFreeQueue[l_i].m_ready.store(false, std::memory_order_relaxed);
-        }
-
-        m_writeIdx.store(0, std::memory_order_relaxed);
+        m_writeIdx = 0;
 
         m_readIdx = 0;
 
@@ -263,6 +254,24 @@ namespace evt
         return l_instance.recordEventInternal(f_eventStr.data(), f_eventStr.size());
     }
 
+    size_t EventVault::getSerializedDataSize()
+    {
+        auto& l_instance = getInstance();
+        if(false == l_instance.m_initInvoked.load(std::memory_order_acquire))
+        {
+            return 0;
+        }
+
+        std::lock_guard<std::mutex> l_lock{l_instance.m_mutex};
+        
+        // Actual serialized size = CRC header (4 bytes) + (number of ledger entries * record size)
+        const size_t l_recordSize = l_instance.m_handle.m_maxStringSize + 1 + sizeof(EventLedgerEntry);
+        const size_t l_numEntries = l_instance.m_eventLedger.size();
+        const size_t l_dataSize = sizeof(uint32_t) + (l_numEntries * l_recordSize);
+        
+        return l_dataSize;
+    }
+
     ErrorType EventVault::publishDataInternal()
     {
         std::lock_guard<std::mutex> l_lock{m_mutex};
@@ -287,19 +296,16 @@ namespace evt
             return ErrorType::SUCCESS;
         }
 
-        const size_t l_idx = m_writeIdx.fetch_add(1, std::memory_order_relaxed) % m_queueCapacity;
-        auto& l_node = m_lockFreeQueue[l_idx];
-
-        // If the consumer hasn't read this node yet, drop event to keep wait-free performance
-        if (l_node.m_ready.load(std::memory_order_acquire))
         {
-            return ErrorType::QUEUE_FULL;
+            std::lock_guard<std::mutex> l_lock{m_queueMutex};
+            if (m_eventQueue.size() >= m_queueCapacity)
+            {
+                return ErrorType::QUEUE_FULL;
+            }
+
+            m_eventQueue.emplace(f_data, f_len);
         }
-
-        std::memcpy(l_node.m_data, f_data, f_len);
-        l_node.m_len = f_len;
-
-        l_node.m_ready.store(true, std::memory_order_release);
+        m_queueCv.notify_one();
         return ErrorType::SUCCESS;
     }
 
@@ -310,60 +316,55 @@ namespace evt
      */
     void EventVault::workerLoop()
     {
-        // Continue running if the thread is active, OR if the queue still has unprocessed events.
-        // This ensures the queue is completely drained during deInit() before the thread exits.
-        while (m_running.load(std::memory_order_acquire) || m_lockFreeQueue[m_readIdx % m_queueCapacity].m_ready.load(std::memory_order_acquire))
+        while (m_running.load(std::memory_order_acquire) || !m_eventQueue.empty())
         {
-            const size_t l_idx = m_readIdx % m_queueCapacity;
-            auto& l_node = m_lockFreeQueue[l_idx];
-
-            if (l_node.m_ready.load(std::memory_order_acquire))
+            std::string l_eventStr{};
             {
-                const auto l_now = std::chrono::steady_clock::now();
+                std::unique_lock<std::mutex> l_queueLock{m_queueMutex};
+                m_queueCv.wait(l_queueLock, [this]() {
+                    return !m_eventQueue.empty() || !m_running.load(std::memory_order_acquire);
+                });
 
-                // Reuse the existing string buffer in the history ring to prevent
-                // frequent dynamic memory allocations (new/delete) in the worker thread loop.
-                auto& l_eventStr = m_eventHistory[m_readIdx % m_handle.m_ringSize];
-                l_eventStr.assign(l_node.m_data, l_node.m_len);
-
-                /*If and only if its a new entry we emplace it for the first Time*/
-                auto l_it{m_eventLedger.find(l_eventStr)};
-                if (l_it == m_eventLedger.end())
+                if (m_eventQueue.empty())
                 {
-                    if (m_eventLedger.size() < m_handle.m_maxLedgerEntries)
-                    {
-                        l_it = m_eventLedger.emplace(l_eventStr, EventLedgerEntry{}).first;
-                    }
+                    continue;
                 }
 
-                // If the event exists OR was successfully added just now
-                if (l_it != m_eventLedger.end())
-                {
-                    auto &l_entry = l_it->second;
-                    const uint64_t l_mono{static_cast<uint64_t>(l_now.time_since_epoch().count())};
-                    const uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
-
-                    /*We log the first time it has occured*/
-                    if (l_entry.m_count == 0)
-                    {
-                        l_entry.m_firstMonoTS = l_mono;
-                        l_entry.m_firstWallTS = l_wall;
-                    }
-                    l_entry.m_count++;
-                    l_entry.m_lastMonoTS = l_mono;
-                    l_entry.m_lastWallTS = l_wall;
-                }
-
-                m_historyIdx++;
-
-                l_node.m_ready.store(false, std::memory_order_release);
-                m_readIdx++;
+                l_eventStr = std::move(m_eventQueue.front());
+                m_eventQueue.pop();
             }
-            else
+
+            const auto l_now = std::chrono::steady_clock::now();
+            auto& l_eventHistoryStr = m_eventHistory[m_readIdx % m_handle.m_ringSize];
+            l_eventHistoryStr = std::move(l_eventStr);
+
+            auto l_it{m_eventLedger.find(l_eventHistoryStr)};
+            if (l_it == m_eventLedger.end())
             {
-                // Do not auto-publish on a timer; wait for the caller to explicitly trigger publishData().
-                std::this_thread::yield();
+                if (m_eventLedger.size() < m_handle.m_maxLedgerEntries)
+                {
+                    l_it = m_eventLedger.emplace(l_eventHistoryStr, EventLedgerEntry{}).first;
+                }
             }
+
+            if (l_it != m_eventLedger.end())
+            {
+                auto &l_entry = l_it->second;
+                const uint64_t l_mono{static_cast<uint64_t>(l_now.time_since_epoch().count())};
+                const uint64_t l_wall{static_cast<uint64_t>(std::chrono::system_clock::now().time_since_epoch().count())};
+
+                if (l_entry.m_count == 0)
+                {
+                    l_entry.m_firstMonoTS = l_mono;
+                    l_entry.m_firstWallTS = l_wall;
+                }
+                l_entry.m_count++;
+                l_entry.m_lastMonoTS = l_mono;
+                l_entry.m_lastWallTS = l_wall;
+            }
+
+            m_historyIdx++;
+            m_readIdx++;
         }
     }
 }
